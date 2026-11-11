@@ -1,8 +1,11 @@
 /.venv/
-
-
-
-.DS.store
+.DS_Store
 /.claude/
 /data/
 /.idea/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.env
+kaggle.json
+
