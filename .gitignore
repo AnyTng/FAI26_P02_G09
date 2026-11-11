@@ -1,0 +1,8 @@
+/.venv/
+
+
+
+.DS.store
+/.claude/
+/data/
+/.idea/
