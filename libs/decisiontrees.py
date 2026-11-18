@@ -3,9 +3,8 @@
 numpy e pandas servem só para guardar e somar arrays: a escolha das divisões,
 o crescimento da árvore e a previsão estão todos aqui.
 
-Simplificações (tratadas na preparação dos dados, no notebook):
-- todas as variáveis têm de ser numéricas -> as categóricas entram em one-hot;
-- não pode haver valores em falta -> são imputados antes.
+Todas as variáveis têm de ser numéricas e sem valores em falta. O notebook
+trata disso antes de treinar a árvore.
 
 Hiperparâmetros: criterion (gini/entropy), max_depth, min_samples_split,
 min_samples_leaf, min_impurity_decrease e class_weight.
@@ -105,7 +104,7 @@ class DecisionTreeClassifier:
         # Importância = ganho de impureza acumulado por variável, normalizado
         total = self._ganhos.sum()
         self.feature_importances_ = self._ganhos / total if total > 0 else self._ganhos
-        # Variáveis 0/1 (one-hot) aparecem nas regras como "= 1" / "= 0"
+        # Variáveis 0/1 aparecem nas regras como "= 1" / "= 0"
         self._binarias = [set(np.unique(X[:, j])) <= {0.0, 1.0} for j in range(X.shape[1])]
         del self._X, self._Y, self._y_idx, self._ganhos
         return self
@@ -311,5 +310,5 @@ class DecisionTreeClassifier:
             X = np.asarray(X, dtype=float)
             nomes = nomes_esperados or [f"x{j}" for j in range(X.shape[1])]
         if np.isnan(X).any():
-            raise ValueError("X tem valores em falta: imputar antes de usar a árvore")
+            raise ValueError("X tem valores em falta, preencher antes de usar a árvore")
         return X, nomes
