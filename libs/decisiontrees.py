@@ -7,7 +7,7 @@ Todas as variáveis têm de ser numéricas e sem valores em falta. O notebook
 trata disso antes de treinar a árvore.
 
 Hiperparâmetros: criterion (gini/entropy), max_depth, min_samples_split,
-min_samples_leaf, min_impurity_decrease e class_weight.
+min_samples_leaf, min_impurity_decrease, class_weight e max_features.
 """
 
 import numpy as np
@@ -55,19 +55,26 @@ class DecisionTreeClassifier:
     min_impurity_decrease : ganho mínimo (ponderado pela fração do peso total
         que chega ao nó) para aceitar uma divisão
     class_weight : None, "balanced" ou {classe: peso}
+    max_features : nº de variáveis sorteadas em cada nó para procurar a divisão.
+        None = todas, "sqrt" = raiz do nº de variáveis, int = esse número,
+        float = essa fração. É o que a random forest usa para diversificar as árvores.
+    random_state : semente do sorteio das variáveis (só conta com max_features)
     """
 
-    PARAMETROS = ("criterion", "max_depth", "min_samples_split",
-                  "min_samples_leaf", "min_impurity_decrease", "class_weight")
+    PARAMETROS = ("criterion", "max_depth", "min_samples_split", "min_samples_leaf",
+                  "min_impurity_decrease", "class_weight", "max_features", "random_state")
 
     def __init__(self, criterion="gini", max_depth=None, min_samples_split=2,
-                 min_samples_leaf=1, min_impurity_decrease=0.0, class_weight=None):
+                 min_samples_leaf=1, min_impurity_decrease=0.0, class_weight=None,
+                 max_features=None, random_state=None):
         self.criterion = criterion
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
         self.min_impurity_decrease = min_impurity_decrease
         self.class_weight = class_weight
+        self.max_features = max_features
+        self.random_state = random_state
 
     def get_params(self):
         return {p: getattr(self, p) for p in self.PARAMETROS}
@@ -98,6 +105,8 @@ class DecisionTreeClassifier:
         self._X = X
         self._peso_total = self._Y.sum()
         self._ganhos = np.zeros(X.shape[1])
+        self._n_sorteadas = self._numero_variaveis(X.shape[1])
+        self._rng = np.random.default_rng(self.random_state)
 
         self.tree_ = self._crescer(np.arange(len(y)), profundidade=0)
 
@@ -106,8 +115,18 @@ class DecisionTreeClassifier:
         self.feature_importances_ = self._ganhos / total if total > 0 else self._ganhos
         # Variáveis 0/1 aparecem nas regras como "= 1" / "= 0"
         self._binarias = [set(np.unique(X[:, j])) <= {0.0, 1.0} for j in range(X.shape[1])]
-        del self._X, self._Y, self._y_idx, self._ganhos
+        del self._X, self._Y, self._y_idx, self._ganhos, self._rng
         return self
+
+    def _numero_variaveis(self, p):
+        """Quantas variáveis se testam em cada nó, conforme max_features."""
+        if self.max_features is None:
+            return p
+        if self.max_features == "sqrt":
+            return max(1, int(np.sqrt(p)))
+        if isinstance(self.max_features, float):
+            return max(1, int(self.max_features * p))
+        return min(p, int(self.max_features))
 
     def _pesos_classes(self, y_idx, K):
         if self.class_weight is None:
@@ -164,7 +183,13 @@ class DecisionTreeClassifier:
         msl = self.min_samples_leaf
         melhor = None
 
-        for j in range(self._X.shape[1]):
+        p = self._X.shape[1]
+        if self._n_sorteadas < p:
+            variaveis = self._rng.choice(p, self._n_sorteadas, replace=False)
+        else:
+            variaveis = range(p)
+
+        for j in variaveis:
             x = self._X[idx, j]
             ordem = np.argsort(x, kind="mergesort")
             x_ord = x[ordem]
@@ -196,11 +221,18 @@ class DecisionTreeClassifier:
     def predict_proba(self, X):
         X, _ = self._matriz(X, nomes_esperados=self.feature_names_)
         proba = np.zeros((len(X), len(self.classes_)))
-        for i, linha in enumerate(X):
-            no = self.tree_
-            while not no.folha:
-                no = no.esquerda if linha[no.variavel] <= no.limiar else no.direita
-            proba[i] = no.pesos / no.pesos.sum()
+
+        # Desce todas as linhas ao mesmo tempo: em cada nó separa os índices
+        # que vão para a esquerda e para a direita
+        def descer(no, idx):
+            if no.folha:
+                proba[idx] = no.pesos / no.pesos.sum()
+                return
+            vai_esq = X[idx, no.variavel] <= no.limiar
+            descer(no.esquerda, idx[vai_esq])
+            descer(no.direita, idx[~vai_esq])
+
+        descer(self.tree_, np.arange(len(X)))
         return proba
 
     def predict(self, X):
