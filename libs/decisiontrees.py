@@ -1,99 +1,68 @@
 """Árvore de decisão para classificação, implementada de raiz.
 
-Só usa numpy/pandas para guardar e somar arrays; o algoritmo (escolha das
-divisões, crescimento da árvore, previsão) está todo aqui.
+numpy e pandas servem só para guardar e somar arrays: a escolha das divisões,
+o crescimento da árvore e a previsão estão todos aqui.
 
-Características:
-- Critério de impureza: Gini ou entropia.
-- Divisões binárias:
-    * numéricas por limiar   -> `x <= t` vs `x > t`
-    * categóricas uma-contra-todas -> `x = c` vs `x ≠ c`
-- Valores em falta (NaN): em cada divisão testa-se mandar as linhas em falta
-  para a esquerda e para a direita, e fica a opção com menor impureza.
-  Se no treino não havia faltas nesse nó, vão para o filho com mais peso.
-- Hiperparâmetros: max_depth, min_samples_split, min_samples_leaf,
-  min_impurity_decrease.
-- Pesos por classe (`class_weight="balanced"` ou dicionário) e por amostra.
-- Importância das variáveis (redução de impureza ponderada) e exportação das
-  regras em texto.
+Simplificações (tratadas na preparação dos dados, no notebook):
+- todas as variáveis têm de ser numéricas -> as categóricas entram em one-hot;
+- não pode haver valores em falta -> são imputados antes.
 
-API ao estilo do scikit-learn: fit, predict, predict_proba, score,
-get_params, set_params.
+Hiperparâmetros: criterion (gini/entropy), max_depth, min_samples_split,
+min_samples_leaf, min_impurity_decrease e class_weight.
 """
-
-from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from pandas.api.types import is_bool_dtype, is_numeric_dtype
-
-_EPS = 1e-12
 
 
-def _impurity(counts: np.ndarray, criterion: str) -> np.ndarray:
-    """Impureza de uma (ou várias) distribuições de pesos por classe.
+def impureza(pesos, criterio):
+    """Impureza de uma ou várias distribuições de classes.
 
-    `counts` tem forma (..., K); devolve um array com forma (...).
+    `pesos` tem forma (..., K): o peso de cada classe. Devolve forma (...).
     """
-    total = counts.sum(axis=-1, keepdims=True)
-    p = np.divide(counts, total, out=np.zeros_like(counts, dtype=float), where=total > 0)
-    if criterion == "gini":
-        return 1.0 - (p ** 2).sum(axis=-1)
-    logp = np.log2(p, out=np.zeros_like(p), where=p > 0)
-    return -(p * logp).sum(axis=-1)
+    total = pesos.sum(axis=-1, keepdims=True)
+    p = np.divide(pesos, total, out=np.zeros_like(pesos, dtype=float), where=total > 0)
+    if criterio == "gini":
+        return 1 - (p ** 2).sum(axis=-1)
+    log_p = np.log2(p, out=np.zeros_like(p), where=p > 0)
+    return -(p * log_p).sum(axis=-1)
 
 
-class Node:
-    """Nó da árvore. É uma folha quando `feature is None`."""
+class No:
+    """Nó da árvore. É uma folha quando `variavel is None`."""
 
-    __slots__ = (
-        "value", "class_counts", "n_samples", "impurity", "depth",
-        "feature", "threshold", "category", "missing_left", "missing_seen",
-        "left", "right",
-    )
-
-    def __init__(self, value, class_counts, n_samples, impurity, depth):
-        self.value = value                # pesos por classe (com class_weight)
-        self.class_counts = class_counts  # contagens reais por classe
-        self.n_samples = n_samples
-        self.impurity = impurity
-        self.depth = depth
-        self.feature = None      # índice da variável usada na divisão
-        self.threshold = None    # limiar (variável numérica)
-        self.category = None     # código da categoria (variável categórica)
-        self.missing_left = True  # para onde vão os valores em falta
-        self.missing_seen = False  # se havia faltas neste nó durante o treino
-        self.left = None
-        self.right = None
+    def __init__(self, pesos, contagens, profundidade):
+        self.pesos = pesos            # peso de cada classe (com class_weight)
+        self.contagens = contagens    # nº real de amostras de cada classe
+        self.n = int(contagens.sum())
+        self.profundidade = profundidade
+        self.variavel = None          # índice da variável da divisão
+        self.limiar = None            # vai para a esquerda se x <= limiar
+        self.esquerda = None
+        self.direita = None
 
     @property
-    def is_leaf(self) -> bool:
-        return self.feature is None
+    def folha(self):
+        return self.variavel is None
 
 
 class DecisionTreeClassifier:
-    """Árvore de decisão para classificação (CART com divisões binárias).
+    """Árvore de decisão (CART, divisões binárias `x <= limiar`).
 
-    Parâmetros
-    ----------
     criterion : "gini" ou "entropy"
     max_depth : profundidade máxima (None = sem limite)
-    min_samples_split : nº mínimo de amostras num nó para o tentar dividir
+    min_samples_split : nº mínimo de amostras para tentar dividir um nó
     min_samples_leaf : nº mínimo de amostras em cada folha
-    min_impurity_decrease : redução mínima de impureza (ponderada pela fração
-        do peso total que chega ao nó) para aceitar uma divisão
-    class_weight : None, "balanced" ou dicionário {classe: peso}
+    min_impurity_decrease : ganho mínimo (ponderado pela fração do peso total
+        que chega ao nó) para aceitar uma divisão
+    class_weight : None, "balanced" ou {classe: peso}
     """
 
-    def __init__(
-        self,
-        criterion: str = "gini",
-        max_depth: int | None = None,
-        min_samples_split: int = 2,
-        min_samples_leaf: int = 1,
-        min_impurity_decrease: float = 0.0,
-        class_weight: str | dict | None = None,
-    ):
+    PARAMETROS = ("criterion", "max_depth", "min_samples_split",
+                  "min_samples_leaf", "min_impurity_decrease", "class_weight")
+
+    def __init__(self, criterion="gini", max_depth=None, min_samples_split=2,
+                 min_samples_leaf=1, min_impurity_decrease=0.0, class_weight=None):
         self.criterion = criterion
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
@@ -101,353 +70,246 @@ class DecisionTreeClassifier:
         self.min_impurity_decrease = min_impurity_decrease
         self.class_weight = class_weight
 
-    # ------------------------------------------------------------------
-    # Parâmetros
-    # ------------------------------------------------------------------
-    _PARAMS = (
-        "criterion", "max_depth", "min_samples_split", "min_samples_leaf",
-        "min_impurity_decrease", "class_weight",
-    )
+    def get_params(self):
+        return {p: getattr(self, p) for p in self.PARAMETROS}
 
-    def get_params(self) -> dict:
-        return {k: getattr(self, k) for k in self._PARAMS}
-
-    def set_params(self, **params) -> "DecisionTreeClassifier":
-        for k, v in params.items():
-            if k not in self._PARAMS:
-                raise ValueError(f"Parâmetro desconhecido: {k}")
-            setattr(self, k, v)
+    def set_params(self, **params):
+        for p, v in params.items():
+            if p not in self.PARAMETROS:
+                raise ValueError(f"Parâmetro desconhecido: {p}")
+            setattr(self, p, v)
         return self
-
-    def __repr__(self) -> str:
-        args = ", ".join(f"{k}={v!r}" for k, v in self.get_params().items())
-        return f"DecisionTreeClassifier({args})"
 
     # ------------------------------------------------------------------
     # Treino
     # ------------------------------------------------------------------
-    def fit(self, X, y, sample_weight=None) -> "DecisionTreeClassifier":
-        if self.criterion not in ("gini", "entropy"):
-            raise ValueError("criterion tem de ser 'gini' ou 'entropy'")
-        if self.min_samples_leaf < 1 or self.min_samples_split < 2:
-            raise ValueError("min_samples_leaf >= 1 e min_samples_split >= 2")
-
-        X = self._as_frame(X)
+    def fit(self, X, y):
+        X, nomes = self._matriz(X)
         y = np.asarray(y)
-        if len(X) != len(y):
-            raise ValueError("X e y têm tamanhos diferentes")
-        if pd.isna(y).any():
-            raise ValueError("y tem valores em falta")
-
-        n = len(y)
-        self.feature_names_ = list(X.columns)
+        self.feature_names_ = nomes
         self.classes_, y_idx = np.unique(y, return_inverse=True)
         K = len(self.classes_)
 
-        w = np.ones(n) if sample_weight is None else np.asarray(sample_weight, dtype=float)
-        w = w * self._class_weights(y_idx, K)[y_idx]
-
-        # Matriz (n, K) com o peso de cada amostra na coluna da sua classe
-        self._Yw = np.zeros((n, K))
-        self._Yw[np.arange(n), y_idx] = w
+        # Peso de cada amostra, conforme a sua classe
+        peso_classe = self._pesos_classes(y_idx, K)
+        # Y[i, k] = peso da amostra i se for da classe k, senão 0
+        self._Y = np.zeros((len(y), K))
+        self._Y[np.arange(len(y)), y_idx] = peso_classe[y_idx]
         self._y_idx = y_idx
+        self._X = X
+        self._peso_total = self._Y.sum()
+        self._ganhos = np.zeros(X.shape[1])
 
-        # Cada coluna fica guardada como float (numérica) ou códigos (categórica)
-        self.feature_types_ = []
-        self.categories_ = {}
-        self._cols = []
-        for name in self.feature_names_:
-            s = X[name]
-            if is_numeric_dtype(s) and not is_bool_dtype(s):
-                self.feature_types_.append("num")
-                self._cols.append(s.to_numpy(dtype=float))
-            else:
-                cat = pd.Categorical(s)
-                self.feature_types_.append("cat")
-                self.categories_[name] = list(cat.categories)
-                self._cols.append(np.asarray(cat.codes, dtype=np.int64))  # NaN -> -1
+        self.tree_ = self._crescer(np.arange(len(y)), profundidade=0)
 
-        self._total_weight = w.sum()
-        self._importances = np.zeros(len(self.feature_names_))
-        self.tree_ = self._grow(np.arange(n), depth=0)
-
-        total = self._importances.sum()
-        self.feature_importances_ = self._importances / total if total > 0 else self._importances
-        del self._Yw, self._y_idx, self._cols, self._importances
+        # Importância = ganho de impureza acumulado por variável, normalizado
+        total = self._ganhos.sum()
+        self.feature_importances_ = self._ganhos / total if total > 0 else self._ganhos
+        # Variáveis 0/1 (one-hot) aparecem nas regras como "= 1" / "= 0"
+        self._binarias = [set(np.unique(X[:, j])) <= {0.0, 1.0} for j in range(X.shape[1])]
+        del self._X, self._Y, self._y_idx, self._ganhos
         return self
 
-    def _class_weights(self, y_idx: np.ndarray, K: int) -> np.ndarray:
+    def _pesos_classes(self, y_idx, K):
         if self.class_weight is None:
             return np.ones(K)
         if self.class_weight == "balanced":
-            counts = np.bincount(y_idx, minlength=K)
-            return len(y_idx) / (K * counts)
-        if isinstance(self.class_weight, dict):
-            return np.array([self.class_weight.get(c, 1.0) for c in self.classes_], dtype=float)
-        raise ValueError("class_weight tem de ser None, 'balanced' ou um dicionário")
+            # Cada classe passa a pesar o mesmo no total: n / (K * n_classe)
+            return len(y_idx) / (K * np.bincount(y_idx, minlength=K))
+        return np.array([self.class_weight.get(c, 1.0) for c in self.classes_], dtype=float)
 
-    def _grow(self, idx: np.ndarray, depth: int) -> Node:
-        counts = self._Yw[idx].sum(axis=0)
-        class_counts = np.bincount(self._y_idx[idx], minlength=len(self.classes_))
-        imp = float(_impurity(counts, self.criterion))
-        node = Node(counts, class_counts, len(idx), imp, depth)
+    def _crescer(self, idx, profundidade):
+        pesos = self._Y[idx].sum(axis=0)
+        contagens = np.bincount(self._y_idx[idx], minlength=len(self.classes_))
+        no = No(pesos, contagens, profundidade)
+        imp = impureza(pesos, self.criterion)
 
         # Critérios de paragem
-        if (
-            (self.max_depth is not None and depth >= self.max_depth)
-            or len(idx) < self.min_samples_split
-            or len(idx) < 2 * self.min_samples_leaf
-            or imp <= _EPS
-        ):
-            return node
+        if ((self.max_depth is not None and profundidade >= self.max_depth)
+                or len(idx) < self.min_samples_split
+                or len(idx) < 2 * self.min_samples_leaf
+                or imp == 0):
+            return no
 
-        split = self._best_split(idx)
-        if split is None:
-            return node
-        child_imp, f, threshold, category, missing_left, missing_seen, go_left = split
+        divisao = self._melhor_divisao(idx)
+        if divisao is None:
+            return no
+        imp_filhos, j, limiar = divisao
 
-        gain = imp - child_imp
-        W = counts.sum()
-        if gain <= _EPS or (W / self._total_weight) * gain < self.min_impurity_decrease:
-            return node
+        # Ganho de impureza, ponderado pela fração do peso que chega a este nó
+        ganho = imp - imp_filhos
+        fracao = pesos.sum() / self._peso_total
+        if ganho <= 0 or fracao * ganho < self.min_impurity_decrease:
+            return no
 
-        self._importances[f] += W * gain
-        node.feature = f
-        node.threshold = threshold
-        node.category = category
-        node.missing_left = missing_left
-        node.missing_seen = missing_seen
-        node.left = self._grow(idx[go_left], depth + 1)
-        node.right = self._grow(idx[~go_left], depth + 1)
-        return node
+        self._ganhos[j] += pesos.sum() * ganho
+        no.variavel, no.limiar = j, limiar
+        vai_esq = self._X[idx, j] <= limiar
+        no.esquerda = self._crescer(idx[vai_esq], profundidade + 1)
+        no.direita = self._crescer(idx[~vai_esq], profundidade + 1)
+        return no
 
-    def _best_split(self, idx: np.ndarray):
-        """Procura a melhor divisão do nó entre todas as variáveis.
+    def _melhor_divisao(self, idx):
+        """Testa todos os limiares de todas as variáveis e devolve o melhor.
 
-        Devolve (impureza dos filhos, variável, limiar, categoria,
-        faltas à esquerda?, havia faltas?, máscara das linhas que vão para a
-        esquerda) ou None se não houver nenhuma divisão válida.
+        Para uma variável, ordenam-se as amostras pelo seu valor. Cortar entre
+        a posição i e i+1 deixa as primeiras i+1 amostras à esquerda, por isso
+        os pesos por classe da esquerda são uma soma acumulada (cumsum) e os
+        da direita são o total menos a esquerda. Assim avaliam-se todos os
+        cortes de uma vez, sem um ciclo por limiar.
+
+        Devolve (impureza ponderada dos filhos, variável, limiar) ou None.
         """
-        Yw = self._Yw[idx]
-        best_imp = np.inf
-        best = None
+        Y = self._Y[idx]
+        n = len(idx)
+        msl = self.min_samples_leaf
+        melhor = None
 
-        for f, kind in enumerate(self.feature_types_):
-            x = self._cols[f][idx]
-            miss = np.isnan(x) if kind == "num" else (x == -1)
-            n_miss = int(miss.sum())
-            pres = ~miss
-            miss_counts = Yw[miss].sum(axis=0)
+        for j in range(self._X.shape[1]):
+            x = self._X[idx, j]
+            ordem = np.argsort(x, kind="mergesort")
+            x_ord = x[ordem]
 
-            if kind == "num":
-                xp = x[pres]
-                if xp.size < 2:
-                    continue
-                order = np.argsort(xp, kind="mergesort")
-                xs = xp[order]
-                cum = np.cumsum(Yw[pres][order], axis=0)
-                # Só faz sentido cortar entre dois valores diferentes
-                pos = np.nonzero(xs[:-1] < xs[1:])[0]
-                if pos.size == 0:
-                    continue
-                left = cum[pos]
-                right = cum[-1] - left
-                n_left = pos + 1
-                n_right = xs.size - n_left
-                candidates = (xs[pos] + xs[pos + 1]) / 2  # limiares
-            else:
-                codes = x[pres]
-                ncat = len(self.categories_[self.feature_names_[f]])
-                n_by_cat = np.bincount(codes, minlength=ncat)
-                cats = np.nonzero(n_by_cat > 0)[0]
-                if cats.size < 2:
-                    continue
-                Yp = Yw[pres]
-                by_cat = np.column_stack(
-                    [np.bincount(codes, weights=Yp[:, k], minlength=ncat) for k in range(Yw.shape[1])]
-                )
-                left = by_cat[cats]
-                right = by_cat.sum(axis=0) - left
-                n_left = n_by_cat[cats]
-                n_right = codes.size - n_left
-                candidates = cats  # categorias
+            acumulado = np.cumsum(Y[ordem], axis=0)
+            esq = acumulado[:-1]                     # pesos à esquerda em cada corte
+            dir_ = acumulado[-1] - esq               # total - esquerda
+            n_esq = np.arange(1, n)                  # nº de amostras à esquerda
 
-            # Testar faltas à esquerda e à direita (se existirem)
-            for miss_left in ((True, False) if n_miss else (True,)):
-                L = left + miss_counts if miss_left else left
-                R = right if miss_left else right + miss_counts
-                nL = n_left + (n_miss if miss_left else 0)
-                nR = n_right + (0 if miss_left else n_miss)
-                ok = (nL >= self.min_samples_leaf) & (nR >= self.min_samples_leaf)
-                if not ok.any():
-                    continue
-                WL, WR = L.sum(axis=1), R.sum(axis=1)
-                child = (WL * _impurity(L, self.criterion) + WR * _impurity(R, self.criterion)) / (WL + WR)
-                child[~ok] = np.inf
-                j = int(np.argmin(child))
-                if child[j] < best_imp - _EPS:
-                    best_imp = child[j]
-                    # Sem faltas no treino: no futuro vão para o filho com mais peso
-                    ml = miss_left if n_miss else bool(WL[j] >= WR[j])
-                    best = (f, kind, candidates[j], ml, n_miss > 0)
+            # Cortes válidos: entre dois valores diferentes e com folhas grandes o suficiente
+            valido = (x_ord[:-1] < x_ord[1:]) & (n_esq >= msl) & (n - n_esq >= msl)
+            if not valido.any():
+                continue
 
-        if best is None:
-            return None
-        f, kind, cand, miss_left, missing_seen = best
-        x = self._cols[f][idx]
-        if kind == "num":
-            miss = np.isnan(x)
-            go_left = np.zeros(len(idx), dtype=bool)
-            go_left[~miss] = x[~miss] <= cand
-            threshold, category = float(cand), None
-        else:
-            miss = x == -1
-            go_left = x == cand
-            threshold, category = None, int(cand)
-        go_left[miss] = miss_left
-        return best_imp, f, threshold, category, miss_left, missing_seen, go_left
+            p_esq, p_dir = esq.sum(axis=1), dir_.sum(axis=1)
+            imp_filhos = (p_esq * impureza(esq, self.criterion)
+                          + p_dir * impureza(dir_, self.criterion)) / (p_esq + p_dir)
+            imp_filhos[~valido] = np.inf
+
+            i = int(np.argmin(imp_filhos))
+            if melhor is None or imp_filhos[i] < melhor[0]:
+                limiar = (x_ord[i] + x_ord[i + 1]) / 2   # ponto médio entre os dois valores
+                melhor = (imp_filhos[i], j, limiar)
+        return melhor
 
     # ------------------------------------------------------------------
     # Previsão
     # ------------------------------------------------------------------
-    def _prepare(self, X) -> list[np.ndarray]:
-        X = self._as_frame(X)
-        missing = [c for c in self.feature_names_ if c not in X.columns]
-        if missing:
-            raise ValueError(f"Faltam colunas em X: {missing}")
-        cols = []
-        for name, kind in zip(self.feature_names_, self.feature_types_):
-            s = X[name]
-            if kind == "num":
-                cols.append(s.to_numpy(dtype=float))
-            else:
-                codes = np.asarray(pd.Categorical(s, categories=self.categories_[name]).codes, dtype=np.int64)
-                # Categoria nunca vista no treino: -2 (não é "em falta", vai sempre para o lado ≠)
-                codes[(codes == -1) & s.notna().to_numpy()] = -2
-                cols.append(codes)
-        return cols
+    def predict_proba(self, X):
+        X, _ = self._matriz(X, nomes_esperados=self.feature_names_)
+        proba = np.zeros((len(X), len(self.classes_)))
+        for i, linha in enumerate(X):
+            no = self.tree_
+            while not no.folha:
+                no = no.esquerda if linha[no.variavel] <= no.limiar else no.direita
+            proba[i] = no.pesos / no.pesos.sum()
+        return proba
 
-    def predict_proba(self, X) -> np.ndarray:
-        cols = self._prepare(X)
-        n = len(cols[0]) if cols else len(X)
-        out = np.zeros((n, len(self.classes_)))
-        self._route(self.tree_, np.arange(n), cols, out)
-        return out
-
-    def _route(self, node: Node, idx: np.ndarray, cols, out: np.ndarray) -> None:
-        if idx.size == 0:
-            return
-        if node.is_leaf:
-            total = node.value.sum()
-            out[idx] = node.value / total if total > 0 else 1.0 / len(self.classes_)
-            return
-        x = cols[node.feature][idx]
-        if self.feature_types_[node.feature] == "num":
-            miss = np.isnan(x)
-            go_left = np.zeros(idx.size, dtype=bool)
-            go_left[~miss] = x[~miss] <= node.threshold
-        else:
-            miss = x == -1
-            go_left = x == node.category
-        go_left[miss] = node.missing_left
-        self._route(node.left, idx[go_left], cols, out)
-        self._route(node.right, idx[~go_left], cols, out)
-
-    def predict(self, X) -> np.ndarray:
+    def predict(self, X):
         return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
 
-    def score(self, X, y) -> float:
+    def score(self, X, y):
         """Accuracy."""
         return float(np.mean(self.predict(X) == np.asarray(y)))
 
     # ------------------------------------------------------------------
     # Inspeção
     # ------------------------------------------------------------------
-    def get_depth(self) -> int:
-        def depth(node):
-            return 0 if node.is_leaf else 1 + max(depth(node.left), depth(node.right))
-        return depth(self.tree_)
+    def get_depth(self):
+        def prof(no):
+            return 0 if no.folha else 1 + max(prof(no.esquerda), prof(no.direita))
+        return prof(self.tree_)
 
-    def get_n_leaves(self) -> int:
-        def leaves(node):
-            return 1 if node.is_leaf else leaves(node.left) + leaves(node.right)
-        return leaves(self.tree_)
+    def get_n_leaves(self):
+        def folhas(no):
+            return 1 if no.folha else folhas(no.esquerda) + folhas(no.direita)
+        return folhas(self.tree_)
 
-    def feature_importances(self) -> pd.Series:
-        """Importâncias como Series ordenada (da mais para a menos importante)."""
+    def feature_importances(self):
+        """Importâncias como Series, da mais para a menos importante."""
         return pd.Series(self.feature_importances_, index=self.feature_names_).sort_values(ascending=False)
 
-    def _conditions(self, node: Node, decimals: int) -> tuple[str, str]:
-        """Texto da condição para o ramo esquerdo e para o direito."""
-        name = self.feature_names_[node.feature]
-        if node.threshold is not None:
-            left = f"{name} <= {node.threshold:.{decimals}f}"
-            right = f"{name} > {node.threshold:.{decimals}f}"
-        else:
-            cat = self.categories_[name][node.category]
-            left, right = f"{name} = {cat}", f"{name} ≠ {cat}"
-        if node.missing_seen:
-            if node.missing_left:
-                left += " ou em falta"
+    def _condicoes(self, no, casas):
+        nome = self.feature_names_[no.variavel]
+        if self._binarias[no.variavel]:
+            return f"{nome} = 0", f"{nome} = 1"
+        return f"{nome} <= {no.limiar:.{casas}f}", f"{nome} > {no.limiar:.{casas}f}"
+
+    def _texto_folha(self, no):
+        classe = self.classes_[np.argmax(no.pesos)]
+        dist = ", ".join(f"{c}: {k / no.n:.0%}" for c, k in zip(self.classes_, no.contagens))
+        return f"→ {classe}  (n={no.n}; {dist})"
+
+    def export_text(self, max_depth=None, decimals=1):
+        """Árvore em texto. Com `max_depth`, os nós mais fundos aparecem resumidos."""
+        linhas = []
+
+        def percorrer(no, recuo):
+            if no.folha or (max_depth is not None and no.profundidade >= max_depth):
+                linhas.append(recuo + self._texto_folha(no) + ("" if no.folha else "  [...]"))
+                return
+            esq, dir_ = self._condicoes(no, decimals)
+            linhas.append(recuo + esq)
+            percorrer(no.esquerda, recuo + "|   ")
+            linhas.append(recuo + dir_)
+            percorrer(no.direita, recuo + "|   ")
+
+        percorrer(self.tree_, "")
+        return "\n".join(linhas)
+
+    def rules(self, decimals=1):
+        """Uma linha por folha: regra, classe prevista, nº de amostras, pureza
+        (fração de amostras da classe prevista) e distribuição das classes.
+
+        As condições sobre a mesma variável são juntadas num intervalo
+        (ex.: `Landsize <= 1104.5 E Landsize <= 685.5` -> `Landsize <= 685.5`).
+        """
+        linhas = []
+
+        def percorrer(no, limites):
+            # limites = {variável: (mínimo exclusivo, máximo inclusivo)}
+            if no.folha:
+                k = int(np.argmax(no.pesos))
+                linha = {"regra": self._texto_regra(limites, decimals),
+                         "classe": self.classes_[k], "n": no.n,
+                         "pureza": round(no.contagens[k] / no.n, 3)}  # % da classe prevista
+                for c, cont in zip(self.classes_, no.contagens):
+                    linha[f"%{c}"] = round(cont / no.n, 3)
+                linhas.append(linha)
+                return
+            j = no.variavel
+            minimo, maximo = limites.get(j, (-np.inf, np.inf))
+            percorrer(no.esquerda, {**limites, j: (minimo, min(maximo, no.limiar))})
+            percorrer(no.direita, {**limites, j: (max(minimo, no.limiar), maximo)})
+
+        percorrer(self.tree_, {})
+        return pd.DataFrame(linhas).sort_values("n", ascending=False, ignore_index=True)
+
+    def _texto_regra(self, limites, casas):
+        partes = []
+        for j, (minimo, maximo) in limites.items():
+            nome = self.feature_names_[j]
+            if self._binarias[j]:
+                partes.append(f"{nome} = {0 if maximo < np.inf else 1}")
+            elif minimo == -np.inf:
+                partes.append(f"{nome} <= {maximo:.{casas}f}")
+            elif maximo == np.inf:
+                partes.append(f"{nome} > {minimo:.{casas}f}")
             else:
-                right += " ou em falta"
-        return left, right
-
-    def _leaf_text(self, node: Node) -> str:
-        pred = self.classes_[int(np.argmax(node.value))]
-        dist = ", ".join(
-            f"{c}: {k / node.n_samples:.0%}" for c, k in zip(self.classes_, node.class_counts)
-        )
-        return f"→ {pred}  (n={node.n_samples}; {dist})"
-
-    def export_text(self, max_depth: int | None = None, decimals: int = 1) -> str:
-        """Árvore em texto, com uma linha por condição e por folha."""
-        lines = []
-
-        def walk(node, indent):
-            if node.is_leaf or (max_depth is not None and node.depth >= max_depth):
-                suffix = "" if node.is_leaf else "  [...]"
-                lines.append(f"{indent}{self._leaf_text(node)}{suffix}")
-                return
-            left, right = self._conditions(node, decimals)
-            lines.append(f"{indent}{left}")
-            walk(node.left, indent + "|   ")
-            lines.append(f"{indent}{right}")
-            walk(node.right, indent + "|   ")
-
-        walk(self.tree_, "")
-        return "\n".join(lines)
-
-    def rules(self, decimals: int = 1) -> pd.DataFrame:
-        """Uma linha por folha: regra completa, classe prevista, suporte e distribuição."""
-        rows = []
-
-        def walk(node, conds):
-            if node.is_leaf:
-                k = int(np.argmax(node.value))
-                row = {
-                    "regra": " E ".join(conds) if conds else "(todas)",
-                    "classe": self.classes_[k],
-                    "n": node.n_samples,
-                    "pureza": node.class_counts[k] / node.n_samples,
-                }
-                for c, cnt in zip(self.classes_, node.class_counts):
-                    row[f"%{c}"] = cnt / node.n_samples
-                rows.append(row)
-                return
-            left, right = self._conditions(node, decimals)
-            walk(node.left, conds + [left])
-            walk(node.right, conds + [right])
-
-        walk(self.tree_, [])
-        return pd.DataFrame(rows).sort_values("n", ascending=False, ignore_index=True)
+                partes.append(f"{minimo:.{casas}f} < {nome} <= {maximo:.{casas}f}")
+        return " E ".join(partes) or "(todas)"
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _as_frame(X) -> pd.DataFrame:
+    def _matriz(X, nomes_esperados=None):
+        """Converte X numa matriz float e valida-a (numérica, sem NaN)."""
         if isinstance(X, pd.DataFrame):
-            return X
-        X = np.asarray(X)
-        if X.ndim != 2:
-            raise ValueError("X tem de ser 2D")
-        return pd.DataFrame(X, columns=[f"x{i}" for i in range(X.shape[1])])
+            if nomes_esperados is not None:
+                X = X[nomes_esperados]
+            nomes = list(X.columns)
+            X = X.to_numpy(dtype=float)
+        else:
+            X = np.asarray(X, dtype=float)
+            nomes = nomes_esperados or [f"x{j}" for j in range(X.shape[1])]
+        if np.isnan(X).any():
+            raise ValueError("X tem valores em falta: imputar antes de usar a árvore")
+        return X, nomes
