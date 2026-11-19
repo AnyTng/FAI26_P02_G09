@@ -99,6 +99,10 @@ def silhouette(X, grupos):
     """Silhouette média de todos os pontos."""
     X = np.asarray(X, dtype=float)
     _, grupos = np.unique(grupos, return_inverse=True)
+    # A silhouette só está definida com 2 clusters ou mais e menos clusters do que pontos
+    k = grupos.max() + 1
+    if not 2 <= k <= len(X) - 1:
+        raise ValueError(f"A silhouette precisa de 2 a {len(X) - 1} clusters, recebeu {k}")
     distancias = np.sqrt(distancias_quadradas(X, X))
 
     # Soma das distâncias de cada ponto a todos os pontos de cada cluster

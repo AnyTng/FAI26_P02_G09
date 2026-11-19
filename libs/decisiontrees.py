@@ -90,6 +90,8 @@ class DecisionTreeClassifier:
     # Treino
     # ------------------------------------------------------------------
     def fit(self, X, y):
+        if self.criterion not in ("gini", "entropy"):
+            raise ValueError(f'criterion tem de ser "gini" ou "entropy", não {self.criterion!r}')
         X, nomes = self._matriz(X)
         y = np.asarray(y)
         self.feature_names_ = nomes
@@ -154,10 +156,12 @@ class DecisionTreeClassifier:
             return no
         imp_filhos, j, limiar = divisao
 
-        # Ganho de impureza, ponderado pela fração do peso que chega a este nó
-        ganho = imp - imp_filhos
+        # Ganho de impureza, ponderado pela fração do peso que chega a este nó.
+        # Aceitamos divisões com ganho 0 porque podem permitir boas divisões mais abaixo,
+        # como no XOR. O 1e-12 evita que um ganho 0 com erro de arredondamento conte como negativo
+        ganho = max(imp - imp_filhos, 0.0)
         fracao = pesos.sum() / self._peso_total
-        if ganho <= 0 or fracao * ganho < self.min_impurity_decrease:
+        if fracao * ganho + 1e-12 < self.min_impurity_decrease:
             return no
 
         self._ganhos[j] += pesos.sum() * ganho
